@@ -1,30 +1,6 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
 
-public class Program
-{
-    public static void Main()
-    {
-        CardReader reader = new CardReader();
-        reader.ConnectReader();
-        reader.SetTimeout(5000);
-        uint uuid = reader.GetUUID();
-
-        if (uuid == 0)
-        {
-            Console.WriteLine("no uuid received");
-        }
-        else
-        {
-            Console.WriteLine("success!");
-        }
-        Console.WriteLine(uuid);
-    }
-}
-
-
-
-
 /*******
  * 
  * See https://pcsclite.apdu.fr/api/group__API.html for API details
@@ -32,7 +8,16 @@ public class Program
  * 
  ******/
 
-class CardReader
+namespace Cardreader;
+
+public struct CardReaderResponse
+{
+    public uint Uuid;
+    public bool Success;
+    public string Error;
+}
+
+public class CardReader
 {
     // Constants for winscard functions.
     const int SCARD_S_SUCCESS = 0;
@@ -161,10 +146,12 @@ class CardReader
     }
 
     // Class variables
-    IntPtr hContext;        // CardReader context handle
-    IntPtr hCard;           // Smartcard handle
-    string readerName;      // Name of selected reader
-    ulong timeout;          // Timeout for polling for cardreader state changes in milliseconds; 0 is instant return.
+    private IntPtr hContext;        // CardReader context handle
+    private IntPtr hCard;           // Smartcard handle
+    private string readerName;      // Name of selected reader
+    private ulong timeout;          // Timeout for polling for cardreader state changes in milliseconds; 0 is instant return.
+
+    private Mutex mu = new Mutex();  // Mutex for preventing multiple users from accessing card reader at the same time
 
     // Constructor
     public CardReader()
@@ -186,6 +173,22 @@ class CardReader
     public void SetTimeout(ulong newTimeout)
     {
         timeout = newTimeout;
+    }
+
+    // Lock wrapper around timeout setter
+    public void SetTimeoutWithLock(ulong newTimeout)
+    {
+        // Skip setting timeout if it's unchanged.
+        if (timeout == newTimeout)
+        {
+            return;
+        }
+
+        if (mu.WaitOne(0))
+        {
+            SetTimeout(newTimeout);
+            mu.ReleaseMutex();
+        }
     }
 
     // Method to initially connect to a cardreader
@@ -224,6 +227,34 @@ class CardReader
         Console.WriteLine("Selected reader: " + readerName);
     }
 
+    // Lock wrapper around GetUUID(); returns a struct with success/failure state
+    public CardReaderResponse GetUUIDWithLock()
+    {
+        var response = new CardReaderResponse()
+        {
+            Uuid = 0,
+            Success = false,
+            Error = "error acquiring UUID, see console output",
+        };
+        if (mu.WaitOne(0))
+        {
+            response.Uuid = GetUUID();
+            if (response.Uuid > 0)
+            {
+                response.Success = true;
+            }
+            mu.ReleaseMutex();
+        }
+        else
+        {
+            response.Uuid = 0;
+            response.Success = false;
+            response.Error = "failed to acquire mutex";
+        }
+        return response;
+    }
+
+
     // Method to get the UUID from a card on the connected cardreader.
     // Blocks for the given timeout duration while waiting for a card to be placed.
     public uint GetUUID()
@@ -242,9 +273,12 @@ class CardReader
         readerState[0] = new SCARD_READERSTATE();
         readerState[0].szReader = readerName;
         readerState[0].dwCurrentState = SCARD_STATE_UNAWARE;
-        // readerState[0].dwEventState will contain the new state after a change event.
-        // - Note: the upper 16 bits of the dwEventState represent the total number of events,
-        //   e.g. 0x160012 represents the 16th event, which is a 0x0010 (no card on reader) and 0x0002 (state changed).
+
+        /******
+        * readerState[0].dwEventState will contain the new state after a change event.
+        * - Note: the upper 16 bits of the dwEventState represent the total number of events,
+        *   e.g. 0x160012 represents the 16th event, which is a 0x0010 (no card on reader) and 0x0002 (state changed).
+        ******/
 
         // Poll for a change in the status of the reader for the given timeout duration.
         // As long as a card is on the reader, it is considered a status change, as we start from UNAWARE.
@@ -272,8 +306,8 @@ class CardReader
             return 0;
         }
 
-            // Log our starting state and the actual state after the change event.
-            foreach (var rs in readerState)
+        // Log our starting state and the actual state after the change event.
+        foreach (var rs in readerState)
         {
             Console.WriteLine("CardStatus - Current: 0x" + $"{rs.dwCurrentState:X}" + " | " + rs.dwCurrentState);
             Console.WriteLine("CardStatus - Event: 0x" + $"{rs.dwEventState:X}" + " | " + rs.dwEventState);
