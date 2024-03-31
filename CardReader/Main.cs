@@ -12,23 +12,43 @@ class Program
     {
         CardReader reader = new CardReader();
         reader.ConnectReader();
-        reader.SetTimeoutWithLock(5000);
-        CardReaderResponse resp = reader.GetUUIDWithLock();
-        if (!resp.Success)
-        {
-            Console.WriteLine("error: " + resp.Error);
-        }
-        uint uuid = resp.Uuid;
+        CardReaderResponse resp;
+        bool alreadyPresent = false;
 
-        if (uuid == 0)
+        reader.SetTimeoutWithLock(CardReader.INFINITE);
+
+        Console.WriteLine("Waiting for cards. Ctrl+C to exit.");
+        Console.WriteLine("----------------------------------\n");
+
+        while (true)
         {
-            Console.WriteLine("no uuid received");
+            try
+            {
+                resp = reader.GetUUIDWithLockAndID(0, alreadyPresent);
+
+                //if (!resp.Success)
+                //{
+                //    Console.WriteLine("error: " + resp.Error);
+                //}
+
+                string id = resp.ID;
+
+                if (id == "")
+                {
+                    Console.WriteLine("-------------------------------\n");
+                    alreadyPresent = false;
+                }
+                else
+                {
+                    Console.WriteLine("\nCard ID: " + id + "\n");
+                    alreadyPresent = true;
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("error, please keep card on reader for longer");
+            }
         }
-        else
-        {
-            Console.WriteLine("success!");
-        }
-        Console.WriteLine(uuid);
     }
 }
 

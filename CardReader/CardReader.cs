@@ -1,5 +1,8 @@
 ﻿using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+
+namespace Cardreader;
 
 /*******
  * 
@@ -8,11 +11,9 @@ using System.Text;
  * 
  ******/
 
-namespace Cardreader;
-
 public struct CardReaderResponse
 {
-    public uint Uuid;
+    public string ID;
     public bool Success;
     public string Error;
 }
@@ -152,6 +153,8 @@ public class CardReader
     private ulong timeout;          // Timeout for polling for cardreader state changes in milliseconds; 0 is instant return.
 
     private Mutex mu = new Mutex();  // Mutex for preventing multiple users from accessing card reader at the same time
+    private bool cancel = false;     // Boolean to cancel waiting on card reader scan
+    private int currUser = -1;
 
     // Constructor
     public CardReader()
@@ -169,6 +172,19 @@ public class CardReader
         Reset();
     }
 
+    public void SetCancel(int id)
+    {
+        if (id == currUser)
+        {
+            Console.WriteLine("Cancelling card reader operations.");
+            cancel = true;
+        }
+        else
+        {
+            Console.WriteLine("Cannot cancel card operations, incorrect user.");
+        }
+    }
+
     // Setter method for timeout duration
     public void SetTimeout(ulong newTimeout)
     {
@@ -176,29 +192,39 @@ public class CardReader
     }
 
     // Lock wrapper around timeout setter
-    public void SetTimeoutWithLock(ulong newTimeout)
+    public bool SetTimeoutWithLock(ulong newTimeout)
     {
+        cancel = false;
         // Skip setting timeout if it's unchanged.
         if (timeout == newTimeout)
         {
-            return;
+            return false;
         }
 
         if (mu.WaitOne(0))
         {
             SetTimeout(newTimeout);
             mu.ReleaseMutex();
+            return true;
         }
+        return false;
     }
 
     // Method to initially connect to a cardreader
     public void ConnectReader()
     {
+        if (hContext != IntPtr.Zero)
+        {
+            Console.WriteLine("CardReader already established, skipping connection setup.");
+            return;
+        }
+
         // Establish context
         int ret = SCardEstablishContext(SCARD_SCOPE_SYSTEM, IntPtr.Zero, IntPtr.Zero, out hContext);
         if (ret != SCARD_S_SUCCESS)
         {
             Console.WriteLine("Failed to establish context. Error: " + (SCardErrors)ret);
+            hContext = IntPtr.Zero;
             return;
         }
 
@@ -209,6 +235,7 @@ public class CardReader
         if (ret != SCARD_S_SUCCESS)
         {
             Console.WriteLine("Failed to list readers. Error: " + (SCardErrors)ret);
+            hContext = IntPtr.Zero;
             return;
         }
 
@@ -219,6 +246,7 @@ public class CardReader
         if (readers.Length == 0)
         {
             Console.WriteLine("No card readers available.");
+            hContext = IntPtr.Zero;
             return;
         }
 
@@ -228,26 +256,38 @@ public class CardReader
     }
 
     // Lock wrapper around GetUUID(); returns a struct with success/failure state
-    public CardReaderResponse GetUUIDWithLock()
+    public CardReaderResponse GetUUIDWithLockAndID(int id, bool alreadyPresent)
     {
+        cancel = false;
         var response = new CardReaderResponse()
         {
-            Uuid = 0,
+            ID = "",
             Success = false,
-            Error = "failed to acquire UUID, see previous console output",
+            Error = "failed to acquire UUID, see console output",
         };
         if (mu.WaitOne(0))
         {
-            response.Uuid = GetUUID();
-            if (response.Uuid > 0)
+            // Set the current user to the given ID; this is the user that is allowed to cancel card operations.
+            currUser = id;
+            try
             {
-                response.Success = true;
+                response.ID = GetUUID(alreadyPresent);
+                if (response.ID != "")
+                {
+                    response.Success = true;
+                }
             }
+            catch (Exception e)
+            {
+                response.Error = e.ToString();
+            }
+            // Reset the current user to -1, which doesn't match any ID.
+            currUser = -1;
             mu.ReleaseMutex();
         }
         else
         {
-            response.Uuid = 0;
+            response.ID = "";
             response.Success = false;
             response.Error = "failed to acquire mutex";
         }
@@ -257,7 +297,7 @@ public class CardReader
 
     // Method to get the UUID from a card on the connected cardreader.
     // Blocks for the given timeout duration while waiting for a card to be placed.
-    public uint GetUUID()
+    public string GetUUID(bool alreadyPresent)
     {
         int ret;
         uint activeProtocol;
@@ -265,7 +305,7 @@ public class CardReader
         if (hContext == IntPtr.Zero || readerName == "")
         {
             Console.WriteLine("Error: not connected to any cardreader, skipping UUID request.");
-            return 0;
+            return "";
         }
 
         // Create a readerState for our selected card reader, with our starting states set to UNAWARE.
@@ -285,25 +325,37 @@ public class CardReader
         var startTime = DateTime.UtcNow;
         while (DateTime.UtcNow - startTime < TimeSpan.FromMilliseconds(timeout))
         {
+            if (cancel)
+            {
+                Console.WriteLine("Card read cancelled.");
+                cancel = false;
+                return "";
+            }
             ret = SCardGetStatusChangeW(hContext, 0, readerState, 1);
 
             if (ret != SCARD_S_SUCCESS)
             {
                 Console.WriteLine("Failed to get status change. Error code: " + (SCardErrors)ret);
-                return 0;
+                return "";
             }
 
-            if ((readerState[0].dwEventState & SCARD_STATE_PRESENT) == SCARD_STATE_PRESENT)
+            if ((readerState[0].dwEventState & SCARD_STATE_PRESENT) == SCARD_STATE_PRESENT && !alreadyPresent)
             {
                 Console.WriteLine("Card inserted.");
                 break;
+            }
+
+            if ((readerState[0].dwEventState & SCARD_STATE_EMPTY) == SCARD_STATE_EMPTY && alreadyPresent)
+            {
+                Console.WriteLine("Card removed.");
+                return "";
             }
         }
 
         if ((readerState[0].dwEventState & SCARD_STATE_PRESENT) != SCARD_STATE_PRESENT)
         {
             Console.WriteLine("Timeout exceeded, no card detected.");
-            return 0;
+            return "";
         }
 
         // Log our starting state and the actual state after the change event.
@@ -318,7 +370,7 @@ public class CardReader
         if (ret != SCARD_S_SUCCESS)
         {
             Console.WriteLine("Failed to connect to the card. Error code: " + (SCardErrors)ret);
-            return 0;
+            return "";
         }
 
         Console.WriteLine("Connected to card on reader: " + readerName);
@@ -337,7 +389,7 @@ public class CardReader
         if (ret != SCARD_S_SUCCESS)
         {
             Console.WriteLine("Failed to transmit command APDU. Error code: " + (SCardErrors)ret);
-            return 0;
+            return "";
         }
 
         // Get decimal representation of UUID.
@@ -345,11 +397,15 @@ public class CardReader
         Array.Copy(response, trimmedResponse, responseLength - 2);
         string hexID = BitConverter.ToString(trimmedResponse);
         hexID = hexID.Replace("-", "");
-        uint uuid = uint.Parse(hexID, System.Globalization.NumberStyles.HexNumber);
 
         // Display response.
-        Console.WriteLine("Card UUID: " + uuid);
-        return uuid;
+        Console.WriteLine("Card UUID: " + hexID);
+        return hexID;
+    }
+
+    public static uint HexToUint(string hexID)
+    {
+        return uint.Parse(hexID, System.Globalization.NumberStyles.HexNumber);
     }
 
     public void Reset()
