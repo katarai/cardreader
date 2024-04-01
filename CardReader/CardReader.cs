@@ -271,7 +271,7 @@ public class CardReader
             currUser = id;
             try
             {
-                response.ID = GetUUID(alreadyPresent);
+                response.ID = GetUUID(alreadyPresent, null);
                 if (response.ID != "")
                 {
                     response.Success = true;
@@ -294,10 +294,29 @@ public class CardReader
         return response;
     }
 
+    
+    public CardReaderResponse GetUUIDWithCancel(int id, bool alreadyPresent, CancellationToken? cancelToken)
+    {
+        Console.WriteLine("\n\n-------\nProcessing card request for ID: " + id);
+        var response = new CardReaderResponse()
+        {
+            ID = "",
+            Success = false,
+            Error = "failed to acquire UUID, see console output",
+        };
+
+        response.ID = GetUUID(alreadyPresent, cancelToken);
+        if (response.ID != "")
+        {
+            response.Error = "";
+        }
+        return response;
+    }
+
 
     // Method to get the UUID from a card on the connected cardreader.
     // Blocks for the given timeout duration while waiting for a card to be placed.
-    public string GetUUID(bool alreadyPresent)
+    public string GetUUID(bool alreadyPresent, CancellationToken? cancelToken)
     {
         int ret;
         uint activeProtocol;
@@ -323,9 +342,16 @@ public class CardReader
         // Poll for a change in the status of the reader for the given timeout duration.
         // As long as a card is on the reader, it is considered a status change, as we start from UNAWARE.
         var startTime = DateTime.UtcNow;
-        while (DateTime.UtcNow - startTime < TimeSpan.FromMilliseconds(timeout))
+        var noCard = true;
+
+        ret = SCardGetStatusChangeW(hContext, 0, readerState, 1);
+        while (
+            (readerState[0].dwEventState & SCARD_STATE_EMPTY) == SCARD_STATE_EMPTY
+            && DateTime.UtcNow - startTime < TimeSpan.FromMilliseconds(timeout)
+        )
         {
-            if (cancel)
+            noCard = false;
+            if (cancel || (cancelToken.HasValue && cancelToken.Value.IsCancellationRequested))
             {
                 Console.WriteLine("Card read cancelled.");
                 cancel = false;
@@ -338,19 +364,29 @@ public class CardReader
                 Console.WriteLine("Failed to get status change. Error code: " + (SCardErrors)ret);
                 return "";
             }
+        }
+        Console.WriteLine("Card removed.");
 
-            if ((readerState[0].dwEventState & SCARD_STATE_PRESENT) == SCARD_STATE_PRESENT && !alreadyPresent)
+        do
+        {
+            if (cancel || (cancelToken.HasValue && cancelToken.Value.IsCancellationRequested))
             {
-                Console.WriteLine("Card inserted.");
-                break;
-            }
-
-            if ((readerState[0].dwEventState & SCARD_STATE_EMPTY) == SCARD_STATE_EMPTY && alreadyPresent)
-            {
-                Console.WriteLine("Card removed.");
+                Console.WriteLine("Card read cancelled.");
+                cancel = false;
                 return "";
             }
-        }
+            ret = SCardGetStatusChangeW(hContext, 0, readerState, 1);
+
+            if (ret != SCARD_S_SUCCESS)
+            {
+                Console.WriteLine("Failed to get status change. Error code: " + (SCardErrors)ret);
+                return "";
+            }
+        } while (
+            !((readerState[0].dwEventState & SCARD_STATE_PRESENT) == SCARD_STATE_PRESENT)
+            && DateTime.UtcNow - startTime < TimeSpan.FromMilliseconds(timeout)
+        );
+        Console.WriteLine("Card inserted.");
 
         if ((readerState[0].dwEventState & SCARD_STATE_PRESENT) != SCARD_STATE_PRESENT)
         {
