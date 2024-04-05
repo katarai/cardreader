@@ -432,10 +432,15 @@ public class CardReader
         byte[] trimmedResponse = new byte[responseLength - 2];
         Array.Copy(response, trimmedResponse, responseLength - 2);
         string hexID = BitConverter.ToString(trimmedResponse);
+        string[] hexIDParts = hexID.Split("-");
+
+        Array.Reverse(hexIDParts);
+        String hexIDReverse = String.Join("", hexIDParts);
         hexID = hexID.Replace("-", "");
 
         // Display response.
         Console.WriteLine("Card UUID: " + hexID);
+        Console.WriteLine("Card UUID (Reverse): " + hexIDReverse);
         return hexID;
     }
 

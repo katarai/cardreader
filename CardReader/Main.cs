@@ -10,7 +10,7 @@ class Program
 {
     public static void Main()
     {
-        ThreadQueueTest();
+        SyncAwaitTest();
     }
 
     public static void ThreadQueueTest()
